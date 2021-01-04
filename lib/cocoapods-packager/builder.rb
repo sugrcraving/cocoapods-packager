@@ -18,7 +18,7 @@ module Pod
       if library
         build_static_library(platform)
       else
-        build_framework(platform)
+        build_xcframework(platform)
       end
     end
 
@@ -33,6 +33,24 @@ module Pod
       build_library(platform, defines, platform_path + Pathname.new("lib#{@spec.name}.a"))
     end
 
+    def build_xcframework(platform)
+      UI.puts("Building xcframework #{@spec} with configuration #{@config}")
+
+      defines = compile(platform)
+      build_sim_libraries(platform, defines)
+
+      if @dynamic
+        build_dynamic_xcframework(platform, defines, "#{@dynamic_sandbox_root}/build/#{@spec.name}.xcframework")
+      else
+        create_framework(platform.name.to_s)
+        build_library(platform, defines, @fwk.versions_path + Pathname.new(@spec.name))
+        copy_headers
+        copy_license
+      end
+
+      copy_resources(platform)
+    end
+
     def build_framework(platform)
       UI.puts("Building framework #{@spec} with configuration #{@config}")
 
@@ -40,7 +58,7 @@ module Pod
       build_sim_libraries(platform, defines)
 
       if @dynamic
-        build_dynamic_framework(platform, defines, "#{@dynamic_sandbox_root}/build/#{@spec.name}.framework/#{@spec.name}")
+        build_dynamic_xcframework(platform, defines, "#{@dynamic_sandbox_root}/build/#{@spec.name}.framework/#{@spec.name}")
       else
         create_framework(platform.name.to_s)
         build_library(platform, defines, @fwk.versions_path + Pathname.new(@spec.name))
@@ -62,6 +80,22 @@ module Pod
     end
 
     private
+
+    def build_dynamic_xcframework(platform, defines, output)
+      UI.puts("Building dynamic XCFramework #{@spec} with configuration #{@config}")
+
+      if @bundle_identifier
+        defines = "#{defines} PRODUCT_BUNDLE_IDENTIFIER='#{@bundle_identifier}'"
+      end
+
+      clean_directory_for_dynamic_build
+      if platform.name == :ios
+        build_dynamic_xcframework_for_ios(platform, defines, output)
+      else
+        raise "Not implemented yet"
+      end
+    end
+
 
     def build_dynamic_framework(platform, defines, output)
       UI.puts("Building dynamic Framework #{@spec} with configuration #{@config}")
@@ -86,6 +120,31 @@ module Pod
       else
         build_static_lib_for_mac(static_libs, output)
       end
+    end
+
+    def build_dynamic_xcframework_for_ios(platform, defines, output)
+
+      # Specify frameworks to link and search paths
+      linker_flags = static_linker_flags_in_sandbox
+      defines = "#{defines} OTHER_LDFLAGS='$(inherited) #{linker_flags.join(' ')}'"
+
+      # Build Target Dynamic Framework for both device and Simulator
+      device_defines = "#{defines} LIBRARY_SEARCH_PATHS=\"#{Dir.pwd}/#{@static_sandbox_root}/build\""
+      device_options = ios_build_options << ' -sdk iphoneos'
+      xcodebuild(device_defines, device_options, 'build', @spec.name.to_s, @dynamic_sandbox_root.to_s)
+
+      sim_defines = "#{defines} LIBRARY_SEARCH_PATHS=\"#{Dir.pwd}/#{@static_sandbox_root}/build-sim\" ONLY_ACTIVE_ARCH=NO"
+      xcodebuild(sim_defines, '-sdk iphonesimulator', 'build-sim', @spec.name.to_s, @dynamic_sandbox_root.to_s)
+
+      # Combine architectures
+      `xcodebuild -create-xcframework \
+          -framework "#{@dynamic_sandbox_root}/build/#{@spec.name}.framework" \
+          -framework "#{@dynamic_sandbox_root}/build-sim/#{@spec.name}.framework" \
+          -output "#{output}"`
+
+      FileUtils.mkdir(platform.name.to_s)
+      `mv #{@dynamic_sandbox_root}/build/#{@spec.name}.xcframework #{platform.name}`
+      `mv #{@dynamic_sandbox_root}/build/#{@spec.name}.framework.dSYM #{platform.name}`
     end
 
     def build_dynamic_framework_for_ios(platform, defines, output)
